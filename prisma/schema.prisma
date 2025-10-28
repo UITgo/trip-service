@@ -1,0 +1,93 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+enum TripStatus {
+  REQUESTED
+  DRIVER_SEARCHING
+  DRIVER_ASSIGNED
+  EN_ROUTE_TO_PICKUP
+  ARRIVED
+  IN_TRIP
+  COMPLETED
+  CANCELED
+  EXPIRED
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Trip {
+  id                String     @id @default(uuid())
+  passengerId       String
+  driverId          String?
+  originLat         Float
+  originLng         Float
+  destLat           Float
+  destLng           Float
+  note              String?
+  status            TripStatus @default(REQUESTED)
+  quoteDistanceKm   Float?
+  quoteDurationMin  Float?
+  quoteFareTotal    Int? // VND
+  actualDistanceKm  Float?
+  actualDurationMin Float?
+  finalFareTotal    Int?
+  canceledAt        DateTime?
+  cancelReasonCode  String?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  events      TripEvent[]
+  assignments TripAssignment[]
+  rating      TripRating?
+
+  @@index([status, createdAt])
+  @@index([passengerId, createdAt])
+  @@index([driverId, status])
+}
+
+model TripEvent {
+  id      String   @id @default(uuid())
+  tripId  String
+  type    String
+  payload Json
+  at      DateTime @default(now())
+  Trip    Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId, at])
+}
+
+model TripAssignment {
+  id          String    @id @default(uuid())
+  tripId      String
+  driverId    String
+  state       String // INVITED|CLAIMED|DECLINED|EXPIRED
+  invitedAt   DateTime  @default(now())
+  respondedAt DateTime?
+  ttlSec      Int
+  Trip        Trip      @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@unique([tripId, driverId])
+  @@index([tripId, state])
+  @@index([driverId, state])
+}
+
+model TripRating {
+  id        String   @id @default(uuid())
+  tripId    String   @unique
+  raterId   String // passengerId
+  driverId  String
+  stars     Int
+  comment   String?
+  createdAt DateTime @default(now())
+  Trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+}
