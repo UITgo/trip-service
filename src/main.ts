@@ -9,5 +9,7 @@ async function bootstrap() {
   const port = cfg.get('PORT') ?? 3003;
   await app.listen(port);
   console.log(`[trip-service] listening on :${port}`);
+  
 }
 bootstrap();
+

@@ -7,7 +7,7 @@ export function emitEvent(tripId: string, type: string, data: any) {
   bus.get(tripId)!.next({ type, data } as any);
 }
 
-@Controller('v1/trips')
+@Controller('trips')
 export class TripsSSEController {
   @Sse(':tripId/events')
   events(@Param('tripId') tripId: string): Observable<MessageEvent> {

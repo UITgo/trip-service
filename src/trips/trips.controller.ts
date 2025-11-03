@@ -3,8 +3,8 @@ import { TripsService } from './trips.service';
 import { CancelDto, CreateTripDto, FinishDto, QuoteDto, RateDto } from './dto';
 import { JwtGuard } from '../common/jwt.guard';
 
-@UseGuards(JwtGuard)
-@Controller('v1/trips')
+
+@Controller('trips')
 export class TripsController {
   constructor(private svc: TripsService) {}
 
