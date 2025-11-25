@@ -6,6 +6,7 @@ import {
   OnModuleInit,
   InternalServerErrorException,
   Logger,
+  ForbiddenException,
 } from '@nestjs/common';
 import type { ClientGrpc } from '@nestjs/microservices';
 import { PrismaClient } from '@prisma/client';
@@ -30,8 +31,15 @@ type TripStatus =
 
 // ----- gRPC service types (Observable!) -----
 type UserGrpc = {
-  GetProfile(data: { user_id: string }): Observable<{ exists: boolean }>;
+  GetProfile(data: { user_id: string }): Observable<{
+    exists: boolean;
+    user_id: string;
+    name: string;
+    avatar_url: string;
+    role: 'PASSENGER' | 'DRIVER' | '';  // hoặc string nếu bạn muốn thoải mái hơn
+  }>;
 };
+
 
 type DriverGrpc = {
   GetNearbyDrivers(data: {
@@ -99,18 +107,32 @@ export class TripsService implements OnModuleInit {
       throw new BadRequestException('origin & destination are required');
     }
 
-  const prof = await firstValueFrom(
-    this.user
-      .GetProfile({ user_id: passengerId })
-      .pipe(
-        catchError(() => of({ exists: false })),
-      ),
-  );
+    // 1) gọi gRPC UserService.GetProfile để kiểm tra user & role
+    const prof = await firstValueFrom(
+      this.user
+        .GetProfile({ user_id: passengerId })
+        .pipe(
+          catchError((err) => {
+            this.logger.warn(
+              `UserService.GetProfile error for ${passengerId}: ${err?.message || err}`,
+            );
+            return of({
+              exists: false,
+              user_id: passengerId,
+              name: '',
+              avatar_url: '',
+              role: '' as const,
+            });
+          }),
+        ),
+    );
 
-  if (!prof?.exists) {
-    this.logger.warn(`User not found (${passengerId}) – bypass in dev`);
-    // optionally: passengerId = 'dev-user';
-  }
+    if (!prof.exists) {
+      throw new BadRequestException('User not found');
+    }
+    if (prof.role !== 'PASSENGER') {
+      throw new ForbiddenException('Only passengers can create trips');
+    }
 
     // 2) tính quote
     const q = await this.quote({
@@ -140,6 +162,9 @@ export class TripsService implements OnModuleInit {
       this.logger.error('Prisma create trip failed', e as any);
       throw new InternalServerErrorException('cannot create trip');
     }
+
+    // ... phần còn lại giữ nguyên
+
 
     emitEvent(trip.id, 'TRIP_CREATED', { id: trip.id, status: trip.status });
 
