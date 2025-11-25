@@ -1,42 +1,66 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
 import { TripsService } from './trips.service';
 import { CancelDto, CreateTripDto, FinishDto, QuoteDto, RateDto } from './dto';
-import { JwtGuard } from '../common/jwt.guard';
-
 
 @Controller('trips')
 export class TripsController {
   constructor(private svc: TripsService) {}
 
-  @Post('quote') quote(@Body() dto: QuoteDto) { return this.svc.quote(dto); }
+  @Post('quote')
+  quote(@Body() dto: QuoteDto) {
+    return this.svc.quote(dto);
+  }
 
   @Post()
   create(@Req() req: any, @Body() dto: CreateTripDto) {
-    const passengerId = req.user?.sub ?? 'passenger';
+    // userId do gateway set từ JWT
+    const passengerId =
+      (req.headers['x-user-id'] as string) || 'u_pass_dev'; // fallback dev
+
     return this.svc.create(passengerId, dto);
   }
 
-  @Get(':tripId') get(@Param('tripId') id: string) { return this.svc.get(id); }
+  @Get(':tripId')
+  get(@Param('tripId') id: string) {
+    return this.svc.get(id);
+  }
 
   @Post(':tripId/cancel')
   cancel(@Req() req: any, @Param('tripId') id: string, @Body() dto: CancelDto) {
-    return this.svc.cancel(id, req.user?.sub ?? 'unknown', dto);
+    const userId = (req.headers['x-user-id'] as string) || 'unknown';
+    return this.svc.cancel(id, userId, dto);
   }
 
   @Post(':tripId/rate')
   rate(@Req() req: any, @Param('tripId') id: string, @Body() dto: RateDto) {
-    return this.svc.rate(id, req.user?.sub ?? 'unknown', dto);
+    const userId = (req.headers['x-user-id'] as string) || 'unknown';
+    return this.svc.rate(id, userId, dto);
   }
 
-  @Post(':tripId/accept')  accept(@Req() req: any, @Param('tripId') id: string) {
-    return this.svc.accept(id, req.user?.sub ?? 'driver');
+  @Post(':tripId/accept')
+  accept(@Req() req: any, @Param('tripId') id: string) {
+    const driverId = (req.headers['x-user-id'] as string) || 'driver_dev';
+    return this.svc.accept(id, driverId);
   }
-  @Post(':tripId/decline') decline(@Req() req: any, @Param('tripId') id: string) {
-    return this.svc.decline(id, req.user?.sub ?? 'driver');
+
+  @Post(':tripId/decline')
+  decline(@Req() req: any, @Param('tripId') id: string) {
+    const driverId = (req.headers['x-user-id'] as string) || 'driver_dev';
+    return this.svc.decline(id, driverId);
   }
-  @Post(':tripId/arrive-pickup') arrive(@Param('tripId') id: string) { return this.svc.arrive(id); }
-  @Post(':tripId/start')          start(@Param('tripId') id: string)  { return this.svc.start(id); }
-  @Post(':tripId/finish')         finish(@Param('tripId') id: string, @Body() b: FinishDto) {
+
+  @Post(':tripId/arrive-pickup')
+  arrive(@Param('tripId') id: string) {
+    return this.svc.arrive(id);
+  }
+
+  @Post(':tripId/start')
+  start(@Param('tripId') id: string) {
+    return this.svc.start(id);
+  }
+
+  @Post(':tripId/finish')
+  finish(@Param('tripId') id: string, @Body() b: FinishDto) {
     return this.svc.finish(id, b);
   }
 }
