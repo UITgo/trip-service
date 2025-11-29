@@ -243,6 +243,7 @@ let TripsService = TripsService_1 = class TripsService {
             throw new common_1.BadRequestException('INVALID_STATE');
         this.logger.log(`Driver ${driverId} attempting to claim trip ${tripId}`);
         const driverStreamBaseUrl = (0, region_shard_config_1.getDriverStreamUrl)(t.cityCode);
+        this.logger.log(`Claim trip ${tripId} via shard ${t.cityCode} (${driverStreamBaseUrl})`);
         let res;
         try {
             const claimResponse = await http_1.Http.post(`${driverStreamBaseUrl}/v1/assign/claim`, {

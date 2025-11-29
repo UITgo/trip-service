@@ -353,6 +353,9 @@ export class TripsService implements OnModuleInit {
     
     // TODO(ModuleA-Shard): Use HTTP to call region-specific driver-stream shard
     const driverStreamBaseUrl = getDriverStreamUrl(t.cityCode);
+    this.logger.log(
+      `Claim trip ${tripId} via shard ${t.cityCode} (${driverStreamBaseUrl})`,
+    );
     
     let res: { status: string };
     try {
