@@ -168,8 +168,10 @@ export class TripsService implements OnModuleInit {
 
     emitEvent(trip.id, 'TRIP_CREATED', { id: trip.id, status: trip.status });
 
-    // 4) hỏi danh sách tài xế gần & prepare assign qua gRPC (không để crash demo)
+    // 4) hỏi danh sách tài xế gần & prepare assign qua gRPC
     try {
+      this.logger.log(`Finding nearby drivers for trip ${trip.id} at (${dto.origin.lat}, ${dto.origin.lng})`);
+      
       const nearby = await firstValueFrom(
         this.driver
           .GetNearbyDrivers({
@@ -186,6 +188,8 @@ export class TripsService implements OnModuleInit {
       );
 
       const candidates = (nearby?.drivers ?? []).map((d) => d.driver_id);
+      this.logger.log(`Found ${candidates.length} nearby drivers for trip ${trip.id}`);
+      
       if (candidates.length) {
         await firstValueFrom(
           this.driver
@@ -219,8 +223,11 @@ export class TripsService implements OnModuleInit {
             payload: ({ candidates } as any),
           },
         });
+      } else {
+        this.logger.warn(`No nearby drivers found for trip ${trip.id}`);
       }
     } catch (e) {
+      this.logger.error(`Driver search error for trip ${trip.id}:`, e);
       await this.prisma.tripEvent.create({
         data: {
           tripId: trip.id,
@@ -301,6 +308,8 @@ export class TripsService implements OnModuleInit {
     const CAN_ACCEPT: TripStatus[] = ['DRIVER_SEARCHING', 'DRIVER_ASSIGNED'];
     if (!CAN_ACCEPT.includes(t.status)) throw new BadRequestException('INVALID_STATE');
 
+    this.logger.log(`Driver ${driverId} attempting to claim trip ${tripId}`);
+    
     const res = await firstValueFrom(
       this.driver.ClaimTrip({ trip_id: tripId, driver_id: driverId }).pipe(
         catchError((err) => {
@@ -311,6 +320,7 @@ export class TripsService implements OnModuleInit {
     );
 
     if (res.status !== 'ACCEPTED') {
+      this.logger.warn(`Trip ${tripId} claim rejected: ${res.status}`);
       await this.prisma.tripAssignment.updateMany({
         where: { tripId, driverId },
         data: { state: 'DECLINED', respondedAt: new Date() },
@@ -319,12 +329,14 @@ export class TripsService implements OnModuleInit {
         data: {
           tripId,
           type: 'DriverDeclined',
-          payload: ({ driverId } as any),
+          payload: ({ driverId, reason: res.status } as any),
         },
       });
-      return { ok: false, reason: 'CLAIM_REJECTED' };
+      return { ok: false, reason: res.status || 'CLAIM_REJECTED' };
     }
 
+    this.logger.log(`Trip ${tripId} successfully claimed by driver ${driverId}`);
+    
     await this.prisma.tripAssignment.updateMany({
       where: { tripId, driverId },
       data: { state: 'CLAIMED', respondedAt: new Date() },
