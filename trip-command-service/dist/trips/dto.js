@@ -12,6 +12,7 @@ class CreateTripDto {
     destination;
     note;
     paymentMethodId;
+    cityCode;
 }
 exports.CreateTripDto = CreateTripDto;
 class CancelDto {

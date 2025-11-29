@@ -18,6 +18,8 @@ const common_1 = require("@nestjs/common");
 const client_1 = require("@prisma/client");
 const config_1 = require("@nestjs/config");
 const sse_controller_1 = require("./sse.controller");
+const region_shard_config_1 = require("../config/region-shard.config");
+const http_1 = require("../common/http");
 const rxjs_1 = require("rxjs");
 const operators_1 = require("rxjs/operators");
 let TripsService = TripsService_1 = class TripsService {
@@ -91,6 +93,7 @@ let TripsService = TripsService_1 = class TripsService {
             destination: dto.destination,
             serviceType: 'bike',
         });
+        const cityCode = dto.cityCode || 'HCM';
         let trip;
         try {
             trip = await this.prisma.trip.create({
@@ -101,6 +104,7 @@ let TripsService = TripsService_1 = class TripsService {
                     destLat: dto.destination.lat,
                     destLng: dto.destination.lng,
                     note: dto.note ?? null,
+                    cityCode,
                     status: 'DRIVER_SEARCHING',
                     quoteDistanceKm: q.distanceKm,
                     quoteDurationMin: q.durationMin,
@@ -114,30 +118,30 @@ let TripsService = TripsService_1 = class TripsService {
         }
         (0, sse_controller_1.emitEvent)(trip.id, 'TRIP_CREATED', { id: trip.id, status: trip.status });
         try {
-            this.logger.log(`Finding nearby drivers for trip ${trip.id} at (${dto.origin.lat}, ${dto.origin.lng})`);
-            const nearby = await (0, rxjs_1.firstValueFrom)(this.driver
-                .GetNearbyDrivers({
-                location: { lat: dto.origin.lat, lng: dto.origin.lng },
-                radius: 3000,
-                limit: 20,
-            })
-                .pipe((0, operators_1.catchError)((err) => {
-                this.logger.warn(`Driver GetNearbyDrivers failed: ${err?.message || err}`);
-                return (0, rxjs_1.of)({ drivers: [] });
-            })));
-            const candidates = (nearby?.drivers ?? []).map((d) => d.driver_id);
-            this.logger.log(`Found ${candidates.length} nearby drivers for trip ${trip.id}`);
+            const driverStreamBaseUrl = (0, region_shard_config_1.getDriverStreamUrl)(trip.cityCode);
+            this.logger.log(`Finding nearby drivers for trip ${trip.id} at (${dto.origin.lat}, ${dto.origin.lng}) via shard ${trip.cityCode} (${driverStreamBaseUrl})`);
+            const nearbyResponse = await http_1.Http.get(`${driverStreamBaseUrl}/v1/drivers/nearby`, {
+                params: {
+                    lat: dto.origin.lat,
+                    lng: dto.origin.lng,
+                    radius: 3000,
+                    limit: 20,
+                },
+            }).catch((err) => {
+                this.logger.warn(`Driver GetNearbyDrivers HTTP failed for shard ${trip.cityCode}: ${err?.message || err}`);
+                return { data: { drivers: [] } };
+            });
+            const drivers = nearbyResponse.data?.drivers || [];
+            const candidates = drivers.map((d) => d.driverId || d.driver_id);
+            this.logger.log(`Found ${candidates.length} nearby drivers for trip ${trip.id} from shard ${trip.cityCode}`);
             if (candidates.length) {
-                await (0, rxjs_1.firstValueFrom)(this.driver
-                    .PrepareAssign({
-                    trip_id: trip.id,
-                    candidate_ids: candidates,
-                    ttl_seconds: 15,
-                })
-                    .pipe((0, operators_1.catchError)((err) => {
-                    this.logger.warn(`Driver PrepareAssign failed: ${err?.message || err}`);
-                    return (0, rxjs_1.of)({ queued: false });
-                })));
+                await http_1.Http.post(`${driverStreamBaseUrl}/v1/assign/prepare`, {
+                    tripId: trip.id,
+                    candidates: candidates,
+                    ttlSeconds: 15,
+                }).catch((err) => {
+                    this.logger.warn(`Driver PrepareAssign HTTP failed for shard ${trip.cityCode}: ${err?.message || err}`);
+                });
                 await this.prisma.tripAssignment.createMany({
                     data: candidates.map((c) => ({
                         tripId: trip.id,
@@ -169,7 +173,11 @@ let TripsService = TripsService_1 = class TripsService {
                 },
             });
         }
-        return { ...trip, tracking: { sse: `/v1/trips/${trip.id}/events` } };
+        return {
+            ...trip,
+            cityCode: trip.cityCode,
+            tracking: { sse: `/v1/trips/${trip.id}/events` },
+        };
     }
     async get(tripId) {
         const t = await this.prisma.trip.findUnique({ where: { id: tripId } });
@@ -234,10 +242,19 @@ let TripsService = TripsService_1 = class TripsService {
         if (!CAN_ACCEPT.includes(t.status))
             throw new common_1.BadRequestException('INVALID_STATE');
         this.logger.log(`Driver ${driverId} attempting to claim trip ${tripId}`);
-        const res = await (0, rxjs_1.firstValueFrom)(this.driver.ClaimTrip({ trip_id: tripId, driver_id: driverId }).pipe((0, operators_1.catchError)((err) => {
-            this.logger.warn(`Driver ClaimTrip failed: ${err?.message || err}`);
-            return (0, rxjs_1.of)({ status: 'DECLINED' });
-        })));
+        const driverStreamBaseUrl = (0, region_shard_config_1.getDriverStreamUrl)(t.cityCode);
+        let res;
+        try {
+            const claimResponse = await http_1.Http.post(`${driverStreamBaseUrl}/v1/assign/claim`, {
+                tripId: tripId,
+                driverId: driverId,
+            });
+            res = { status: claimResponse.data?.status || 'ACCEPTED' };
+        }
+        catch (err) {
+            this.logger.warn(`Driver ClaimTrip HTTP failed for shard ${t.cityCode}: ${err?.message || err}`);
+            res = { status: 'DECLINED' };
+        }
         if (res.status !== 'ACCEPTED') {
             this.logger.warn(`Trip ${tripId} claim rejected: ${res.status}`);
             await this.prisma.tripAssignment.updateMany({

@@ -34,7 +34,7 @@ model Trip {
   destLat           Float
   destLng           Float
   note              String?
-  cityCode          String?   // TODO(ModuleA-Shard): City/region code for driver-stream sharding (HCM, HN, etc.)
+  cityCode          String? // TODO(ModuleA-Shard): City/region code for driver-stream sharding (HCM, HN, etc.)
   status            TripStatus @default(REQUESTED)
   quoteDistanceKm   Float?
   quoteDurationMin  Float?

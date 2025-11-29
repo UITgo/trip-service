@@ -34,6 +34,7 @@ export declare class TripsService implements OnModuleInit {
         destLat: number;
         destLng: number;
         note: string | null;
+        cityCode: string | null;
         status: import("@prisma/client").$Enums.TripStatus;
         quoteDistanceKm: number | null;
         quoteDurationMin: number | null;

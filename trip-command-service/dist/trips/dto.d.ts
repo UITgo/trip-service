@@ -12,6 +12,7 @@ export declare class CreateTripDto {
     destination: LatLng;
     note?: string;
     paymentMethodId?: string;
+    cityCode?: string;
 }
 export declare class CancelDto {
     reasonCode: string;
