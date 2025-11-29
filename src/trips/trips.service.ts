@@ -13,6 +13,7 @@ import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { CancelDto, CreateTripDto, FinishDto, QuoteDto, RateDto } from './dto';
 import { emitEvent } from './sse.controller';
+import { RedisService } from '../common/redis.service';
 
 import { Observable, of, firstValueFrom } from 'rxjs';
 import { catchError } from 'rxjs/operators';
@@ -73,6 +74,7 @@ export class TripsService implements OnModuleInit {
     private cfg: ConfigService,
     @Inject('USER_GRPC') private readonly userClient: ClientGrpc,
     @Inject('DRIVER_GRPC') private readonly driverClient: ClientGrpc,
+    private redis: RedisService,
   ) {}
 
   onModuleInit() {
@@ -242,9 +244,45 @@ export class TripsService implements OnModuleInit {
 
   // ---------------- Get ----------------
   async get(tripId: string) {
+    const cacheKey = `trip:${tripId}`;
+    
+    // 1. Check Redis cache
+    try {
+      const cached = await this.redis.get(cacheKey);
+      if (cached) {
+        this.logger.debug(`Cache hit for trip ${tripId}`);
+        return JSON.parse(cached);
+      }
+    } catch (err) {
+      this.logger.warn(`Redis get error for ${cacheKey}:`, err);
+      // Continue to DB query on cache error
+    }
+
+    // 2. Cache miss - query Postgres
     const t = await this.prisma.trip.findUnique({ where: { id: tripId } });
     if (!t) throw new NotFoundException();
+
+    // 3. Set cache with TTL 60 seconds
+    try {
+      await this.redis.set(cacheKey, JSON.stringify(t), 60);
+      this.logger.debug(`Cache set for trip ${tripId}`);
+    } catch (err) {
+      this.logger.warn(`Redis set error for ${cacheKey}:`, err);
+      // Don't fail the request if cache fails
+    }
+
     return t;
+  }
+
+  // Helper method to invalidate cache
+  private async invalidateCache(tripId: string) {
+    const cacheKey = `trip:${tripId}`;
+    try {
+      await this.redis.del(cacheKey);
+      this.logger.debug(`Cache invalidated for trip ${tripId}`);
+    } catch (err) {
+      this.logger.warn(`Redis del error for ${cacheKey}:`, err);
+    }
   }
 
   // ---------------- Cancel ----------------
@@ -271,6 +309,9 @@ export class TripsService implements OnModuleInit {
         payload: ({ by, ...reason } as any),
       },
     });
+
+    // Invalidate cache after update
+    await this.invalidateCache(tripId);
 
     return { success: true };
   }
@@ -357,6 +398,9 @@ export class TripsService implements OnModuleInit {
       },
     });
 
+    // Invalidate cache after update
+    await this.invalidateCache(tripId);
+
     return { ok: true };
   }
 
@@ -409,6 +453,9 @@ export class TripsService implements OnModuleInit {
       data: { tripId, type: 'Completed', payload: ({ ...body } as any) },
     });
 
+    // Invalidate cache after completion
+    await this.invalidateCache(tripId);
+
     return { finalFareTotal: final, ok: true };
   }
 
@@ -425,6 +472,9 @@ export class TripsService implements OnModuleInit {
     await this.prisma.tripEvent.create({
       data: { tripId, type: evt, payload: ({} as any) },
     });
+
+    // Invalidate cache after status update
+    await this.invalidateCache(tripId);
 
     return { ok: true };
   }

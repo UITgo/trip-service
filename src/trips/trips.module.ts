@@ -4,11 +4,13 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TripsService } from './trips.service';
 import { TripsController } from './trips.controller';
 import { USER_PROTO, DRIVER_PROTO } from '../common/proto-path';
+import { RedisModule } from '../common/redis.module';
 
 @Module({
   imports: [
     // Dù ConfigModule global, thêm vào đây để registerAsync có context chắc chắn
     ConfigModule,
+    RedisModule,
     ClientsModule.registerAsync([
       {
         name: 'USER_GRPC',
