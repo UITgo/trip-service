@@ -15,7 +15,6 @@ export declare class TripsController {
         };
     }>;
     create(req: any, dto: CreateTripDto): Promise<any>;
-    get(id: string): Promise<any>;
     cancel(req: any, id: string, dto: CancelDto): Promise<{
         success: boolean;
     }>;

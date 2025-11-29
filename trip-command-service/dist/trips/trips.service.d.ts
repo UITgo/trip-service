@@ -3,17 +3,15 @@ import type { ClientGrpc } from '@nestjs/microservices';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { CancelDto, CreateTripDto, FinishDto, QuoteDto, RateDto } from './dto';
-import { RedisService } from '../common/redis.service';
 export declare class TripsService implements OnModuleInit {
     private cfg;
     private readonly userClient;
     private readonly driverClient;
-    private redis;
     private readonly logger;
-    prisma: PrismaClient<import("@prisma/client").Prisma.PrismaClientOptions, never, import("@prisma/client/runtime/library").DefaultArgs>;
+    prisma: PrismaClient;
     private user;
     private driver;
-    constructor(cfg: ConfigService, userClient: ClientGrpc, driverClient: ClientGrpc, redis: RedisService);
+    constructor(cfg: ConfigService, userClient: ClientGrpc, driverClient: ClientGrpc);
     onModuleInit(): void;
     quote(dto: QuoteDto): Promise<{
         distanceKm: number;
@@ -27,7 +25,27 @@ export declare class TripsService implements OnModuleInit {
         };
     }>;
     create(passengerId: string, dto: CreateTripDto): Promise<any>;
-    get(tripId: string): Promise<any>;
+    get(tripId: string): Promise<{
+        id: string;
+        passengerId: string;
+        driverId: string | null;
+        originLat: number;
+        originLng: number;
+        destLat: number;
+        destLng: number;
+        note: string | null;
+        status: import("@prisma/client").$Enums.TripStatus;
+        quoteDistanceKm: number | null;
+        quoteDurationMin: number | null;
+        quoteFareTotal: number | null;
+        actualDistanceKm: number | null;
+        actualDurationMin: number | null;
+        finalFareTotal: number | null;
+        canceledAt: Date | null;
+        cancelReasonCode: string | null;
+        createdAt: Date;
+        updatedAt: Date;
+    }>;
     private invalidateCache;
     cancel(tripId: string, by: string, reason: CancelDto): Promise<{
         success: boolean;

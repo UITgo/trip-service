@@ -16,7 +16,7 @@ const prisma = new client_1.PrismaClient();
 let HealthController = class HealthController {
     async ok() {
         await prisma.$queryRaw `SELECT 1`;
-        return { ok: true, service: 'trip-service' };
+        return { ok: true, service: 'trip-command-service' };
     }
 };
 exports.HealthController = HealthController;

@@ -28,9 +28,6 @@ let TripsController = class TripsController {
         const passengerId = req.headers['x-user-id'] || 'u_pass_dev';
         return this.svc.create(passengerId, dto);
     }
-    get(id) {
-        return this.svc.get(id);
-    }
     cancel(req, id, dto) {
         const userId = req.headers['x-user-id'] || 'unknown';
         return this.svc.cancel(id, userId, dto);
@@ -41,6 +38,10 @@ let TripsController = class TripsController {
     }
     accept(req, id) {
         const driverId = req.headers['x-user-id'] || 'driver_dev';
+        const role = req.headers['x-user-role'] || '';
+        if (role !== 'DRIVER') {
+            throw new common_1.ForbiddenException('Only drivers can accept trips');
+        }
         return this.svc.accept(id, driverId);
     }
     decline(req, id) {
@@ -73,13 +74,6 @@ __decorate([
     __metadata("design:paramtypes", [Object, dto_1.CreateTripDto]),
     __metadata("design:returntype", void 0)
 ], TripsController.prototype, "create", null);
-__decorate([
-    (0, common_1.Get)(':tripId'),
-    __param(0, (0, common_1.Param)('tripId')),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
-    __metadata("design:returntype", void 0)
-], TripsController.prototype, "get", null);
 __decorate([
     (0, common_1.Post)(':tripId/cancel'),
     __param(0, (0, common_1.Req)()),

@@ -13,7 +13,6 @@ const config_1 = require("@nestjs/config");
 const trips_service_1 = require("./trips.service");
 const trips_controller_1 = require("./trips.controller");
 const proto_path_1 = require("../common/proto-path");
-const redis_module_1 = require("../common/redis.module");
 let TripsModule = class TripsModule {
 };
 exports.TripsModule = TripsModule;
@@ -21,7 +20,6 @@ exports.TripsModule = TripsModule = __decorate([
     (0, common_1.Module)({
         imports: [
             config_1.ConfigModule,
-            redis_module_1.RedisModule,
             microservices_1.ClientsModule.registerAsync([
                 {
                     name: 'USER_GRPC',

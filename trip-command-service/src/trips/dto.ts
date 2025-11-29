@@ -11,6 +11,7 @@ export class CreateTripDto {
   destination!: LatLng;
   note?: string;
   paymentMethodId?: string;
+  cityCode?: string; // TODO(ModuleA-Shard): City code for sharding (HCM, HN, etc.). If not provided, defaults to "HCM" for demo
 }
 
 export class CancelDto {

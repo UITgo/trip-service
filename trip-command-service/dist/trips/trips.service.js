@@ -18,23 +18,28 @@ const common_1 = require("@nestjs/common");
 const client_1 = require("@prisma/client");
 const config_1 = require("@nestjs/config");
 const sse_controller_1 = require("./sse.controller");
-const redis_service_1 = require("../common/redis.service");
 const rxjs_1 = require("rxjs");
 const operators_1 = require("rxjs/operators");
 let TripsService = TripsService_1 = class TripsService {
     cfg;
     userClient;
     driverClient;
-    redis;
     logger = new common_1.Logger(TripsService_1.name);
-    prisma = new client_1.PrismaClient();
+    prisma;
     user;
     driver;
-    constructor(cfg, userClient, driverClient, redis) {
+    constructor(cfg, userClient, driverClient) {
         this.cfg = cfg;
         this.userClient = userClient;
         this.driverClient = driverClient;
-        this.redis = redis;
+        const primaryDbUrl = this.cfg.get('PRIMARY_DB_URL') || this.cfg.get('DATABASE_URL') || 'postgresql://uitgo:uitgo@postgres:5432/tripdb?schema=public';
+        this.prisma = new client_1.PrismaClient({
+            datasources: {
+                db: {
+                    url: primaryDbUrl,
+                },
+            },
+        });
     }
     onModuleInit() {
         this.user = this.userClient.getService('UserService');
@@ -167,38 +172,13 @@ let TripsService = TripsService_1 = class TripsService {
         return { ...trip, tracking: { sse: `/v1/trips/${trip.id}/events` } };
     }
     async get(tripId) {
-        const cacheKey = `trip:${tripId}`;
-        try {
-            const cached = await this.redis.get(cacheKey);
-            if (cached) {
-                this.logger.debug(`Cache hit for trip ${tripId}`);
-                return JSON.parse(cached);
-            }
-        }
-        catch (err) {
-            this.logger.warn(`Redis get error for ${cacheKey}:`, err);
-        }
         const t = await this.prisma.trip.findUnique({ where: { id: tripId } });
         if (!t)
             throw new common_1.NotFoundException();
-        try {
-            await this.redis.set(cacheKey, JSON.stringify(t), 60);
-            this.logger.debug(`Cache set for trip ${tripId}`);
-        }
-        catch (err) {
-            this.logger.warn(`Redis set error for ${cacheKey}:`, err);
-        }
         return t;
     }
     async invalidateCache(tripId) {
-        const cacheKey = `trip:${tripId}`;
-        try {
-            await this.redis.del(cacheKey);
-            this.logger.debug(`Cache invalidated for trip ${tripId}`);
-        }
-        catch (err) {
-            this.logger.warn(`Redis del error for ${cacheKey}:`, err);
-        }
+        this.logger.debug(`Cache invalidation for trip ${tripId} delegated to query service`);
     }
     async cancel(tripId, by, reason) {
         const t = await this.get(tripId);
@@ -363,6 +343,6 @@ exports.TripsService = TripsService = TripsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(1, (0, common_1.Inject)('USER_GRPC')),
     __param(2, (0, common_1.Inject)('DRIVER_GRPC')),
-    __metadata("design:paramtypes", [config_1.ConfigService, Object, Object, redis_service_1.RedisService])
+    __metadata("design:paramtypes", [config_1.ConfigService, Object, Object])
 ], TripsService);
 //# sourceMappingURL=trips.service.js.map

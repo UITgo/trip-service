@@ -9,7 +9,7 @@ async function bootstrap() {
     const cfg = app.get(config_1.ConfigService);
     const port = cfg.get('PORT') ?? 3003;
     await app.listen(port);
-    console.log(`[trip-service] listening on :${port}`);
+    console.log(`[trip-command-service] listening on :${port}`);
 }
 bootstrap();
 //# sourceMappingURL=main.js.map

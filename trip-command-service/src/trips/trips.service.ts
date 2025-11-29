@@ -14,6 +14,8 @@ import { ConfigService } from '@nestjs/config';
 import { CancelDto, CreateTripDto, FinishDto, QuoteDto, RateDto } from './dto';
 import { emitEvent } from './sse.controller';
 // TODO(ModuleA-CQRS): Redis removed from command service (cache handled by query service)
+import { getDriverStreamUrl } from '../config/region-shard.config';
+import { Http } from '../common/http';
 
 import { Observable, of, firstValueFrom } from 'rxjs';
 import { catchError } from 'rxjs/operators';
@@ -153,6 +155,10 @@ export class TripsService implements OnModuleInit {
       serviceType: 'bike',
     });
 
+    // TODO(ModuleA-Shard): Determine city_code from request or infer from lat/lng
+    // For MVP: use city_code from request body, or default to "HCM" for demo
+    const cityCode = dto.cityCode || 'HCM'; // Default to HCM for local demo
+
     // 3) tạo trip
     let trip;
     try {
@@ -164,6 +170,7 @@ export class TripsService implements OnModuleInit {
           destLat: dto.destination.lat,
           destLng: dto.destination.lng,
           note: dto.note ?? null,
+          cityCode, // TODO(ModuleA-Shard): Store city_code for sharding
           status: 'DRIVER_SEARCHING' as TripStatus,
           quoteDistanceKm: q.distanceKm,
           quoteDurationMin: q.durationMin,
@@ -180,43 +187,49 @@ export class TripsService implements OnModuleInit {
 
     emitEvent(trip.id, 'TRIP_CREATED', { id: trip.id, status: trip.status });
 
-    // 4) hỏi danh sách tài xế gần & prepare assign qua gRPC
+    // 4) TODO(ModuleA-Shard): Find nearby drivers via HTTP to region-specific driver-stream shard
     try {
-      this.logger.log(`Finding nearby drivers for trip ${trip.id} at (${dto.origin.lat}, ${dto.origin.lng})`);
-      
-      const nearby = await firstValueFrom(
-        this.driver
-          .GetNearbyDrivers({
-            location: { lat: dto.origin.lat, lng: dto.origin.lng },
-            radius: 3000,
-            limit: 20,
-          })
-          .pipe(
-            catchError((err) => {
-              this.logger.warn(`Driver GetNearbyDrivers failed: ${err?.message || err}`);
-              return of({ drivers: [] });
-            }),
-          ),
+      // Get driver-stream base URL for this city/region
+      const driverStreamBaseUrl = getDriverStreamUrl(trip.cityCode);
+      this.logger.log(
+        `Finding nearby drivers for trip ${trip.id} at (${dto.origin.lat}, ${dto.origin.lng}) via shard ${trip.cityCode} (${driverStreamBaseUrl})`,
       );
 
-      const candidates = (nearby?.drivers ?? []).map((d) => d.driver_id);
-      this.logger.log(`Found ${candidates.length} nearby drivers for trip ${trip.id}`);
-      
-      if (candidates.length) {
-        await firstValueFrom(
-          this.driver
-            .PrepareAssign({
-              trip_id: trip.id,
-              candidate_ids: candidates,
-              ttl_seconds: 15,
-            })
-            .pipe(
-              catchError((err) => {
-                this.logger.warn(`Driver PrepareAssign failed: ${err?.message || err}`);
-                return of({ queued: false });
-              }),
-            ),
+      // Call GetNearbyDrivers via HTTP
+      const nearbyResponse = await Http.get(
+        `${driverStreamBaseUrl}/v1/drivers/nearby`,
+        {
+          params: {
+            lat: dto.origin.lat,
+            lng: dto.origin.lng,
+            radius: 3000,
+            limit: 20,
+          },
+        },
+      ).catch((err) => {
+        this.logger.warn(
+          `Driver GetNearbyDrivers HTTP failed for shard ${trip.cityCode}: ${err?.message || err}`,
         );
+        return { data: { drivers: [] } };
+      });
+
+      const drivers = nearbyResponse.data?.drivers || [];
+      const candidates = drivers.map((d: any) => d.driverId || d.driver_id);
+      this.logger.log(
+        `Found ${candidates.length} nearby drivers for trip ${trip.id} from shard ${trip.cityCode}`,
+      );
+
+      if (candidates.length) {
+        // Call PrepareAssign via HTTP
+        await Http.post(`${driverStreamBaseUrl}/v1/assign/prepare`, {
+          tripId: trip.id,
+          candidates: candidates,
+          ttlSeconds: 15,
+        }).catch((err) => {
+          this.logger.warn(
+            `Driver PrepareAssign HTTP failed for shard ${trip.cityCode}: ${err?.message || err}`,
+          );
+        });
 
         await this.prisma.tripAssignment.createMany({
           data: candidates.map((c) => ({
@@ -249,7 +262,11 @@ export class TripsService implements OnModuleInit {
       });
     }
 
-    return { ...trip, tracking: { sse: `/v1/trips/${trip.id}/events` } };
+    return {
+      ...trip,
+      cityCode: trip.cityCode, // TODO(ModuleA-Shard): Include city_code in response for debugging
+      tracking: { sse: `/v1/trips/${trip.id}/events` },
+    };
   }
 
   // TODO(ModuleA-CQRS): Get operation moved to trip-query-service
@@ -334,14 +351,25 @@ export class TripsService implements OnModuleInit {
 
     this.logger.log(`Driver ${driverId} attempting to claim trip ${tripId}`);
     
-    const res = await firstValueFrom(
-      this.driver.ClaimTrip({ trip_id: tripId, driver_id: driverId }).pipe(
-        catchError((err) => {
-          this.logger.warn(`Driver ClaimTrip failed: ${err?.message || err}`);
-          return of({ status: 'DECLINED' });
-        }),
-      ),
-    );
+    // TODO(ModuleA-Shard): Use HTTP to call region-specific driver-stream shard
+    const driverStreamBaseUrl = getDriverStreamUrl(t.cityCode);
+    
+    let res: { status: string };
+    try {
+      const claimResponse = await Http.post(
+        `${driverStreamBaseUrl}/v1/assign/claim`,
+        {
+          tripId: tripId,
+          driverId: driverId,
+        },
+      );
+      res = { status: claimResponse.data?.status || 'ACCEPTED' };
+    } catch (err: any) {
+      this.logger.warn(
+        `Driver ClaimTrip HTTP failed for shard ${t.cityCode}: ${err?.message || err}`,
+      );
+      res = { status: 'DECLINED' };
+    }
 
     if (res.status !== 'ACCEPTED') {
       this.logger.warn(`Trip ${tripId} claim rejected: ${res.status}`);
