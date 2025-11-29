@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req, ForbiddenException } from '@nestjs/common';
 import { TripsService } from './trips.service';
 import { CancelDto, CreateTripDto, FinishDto, QuoteDto, RateDto } from './dto';
 
@@ -40,6 +40,12 @@ export class TripsController {
   @Post(':tripId/accept')
   accept(@Req() req: any, @Param('tripId') id: string) {
     const driverId = (req.headers['x-user-id'] as string) || 'driver_dev';
+    const role = (req.headers['x-user-role'] as string) || '';
+    
+    if (role !== 'DRIVER') {
+      throw new ForbiddenException('Only drivers can accept trips');
+    }
+    
     return this.svc.accept(id, driverId);
   }
 
