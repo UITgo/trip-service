@@ -1,98 +1,267 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# UITGo Trip Command Service
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Service xử lý các thao tác **write** (ghi) cho Trip domain, áp dụng pattern **CQRS** (Command Query Responsibility Segregation).
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Tổng quan
 
-## Description
+Trip Command Service chịu trách nhiệm:
+- **Trip Creation**: Tạo trip mới, tính fare, tìm tài xế gần nhất
+- **Trip State Management**: Accept, decline, cancel, start, finish trips
+- **Driver Assignment**: Tích hợp với `driver-stream` để assign drivers
+- **Region Sharding**: Route requests đến đúng `driver-stream` shard dựa trên `cityCode`
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Kiến trúc CQRS
 
-## Project setup
+Trip service được tách thành 2 services:
 
-```bash
-$ npm install
+1. **trip-command-service** (Write side):
+   - Xử lý tất cả write operations (POST, PUT, DELETE)
+   - Sử dụng `PRIMARY_DB_URL` (PostgreSQL primary database)
+   - Không có cache (write operations cần consistency)
+
+2. **trip-query-service** (Read side):
+   - Xử lý tất cả read operations (GET)
+   - Sử dụng `READ_DB_URL` (PostgreSQL read replica)
+   - Có Redis cache cho read-heavy paths
+
+## Endpoints
+
+### Trip Operations
+
+- `POST /trips/quote` - Tính fare cho trip
+  - Body: `{ origin: { lat, lng }, destination: { lat, lng } }`
+  - Returns: `{ fare: number, distance: number, duration: number }`
+  - Uses: OSRM để tính distance/duration
+
+- `POST /trips` - Tạo trip mới
+  - Headers: `X-User-Id` (passenger ID từ gateway)
+  - Body: 
+    ```json
+    {
+      "origin": { "lat": 10.762622, "lng": 106.660172 },
+      "destination": { "lat": 10.7769, "lng": 106.7009 },
+      "note": "Optional note",
+      "cityCode": "HCM"  // Optional, defaults to "HCM"
+    }
+    ```
+  - Returns: Trip object với status `DRIVER_SEARCHING`
+  - Flow:
+    1. Verify user role (PASSENGER) qua gRPC `GetProfile`
+    2. Calculate fare với OSRM
+    3. Create trip trong PostgreSQL với `cityCode`
+    4. Find nearby drivers qua `driver-stream` (shard theo `cityCode`)
+    5. Prepare assignment với candidates
+    6. Return trip
+
+- `POST /trips/:tripId/accept` - Driver accept trip
+  - Headers: `X-User-Id` (driver ID), `X-User-Role` (must be DRIVER)
+  - Returns: Trip với status `ACCEPTED`
+  - Flow:
+    1. Verify driver role
+    2. Get trip từ database
+    3. Claim trip qua `driver-stream` (shard theo trip's `cityCode`)
+    4. Update trip status to `ACCEPTED`
+    5. Return trip
+
+- `POST /trips/:tripId/decline` - Driver decline trip
+  - Headers: `X-User-Id` (driver ID)
+  - Returns: `{ status: "DECLINED" }`
+  - Flow: Update assignment state trong `driver-stream`
+
+- `POST /trips/:tripId/cancel` - Cancel trip
+  - Headers: `X-User-Id` (user ID)
+  - Body: `{ reason?: string }`
+  - Returns: Trip với status `CANCELLED`
+
+- `POST /trips/:tripId/rate` - Rate trip
+  - Headers: `X-User-Id` (user ID)
+  - Body: `{ rating: number, comment?: string }`
+  - Returns: Updated trip
+
+- `POST /trips/:tripId/arrive-pickup` - Driver arrived at pickup
+  - Returns: Trip với status `DRIVER_ARRIVED`
+
+- `POST /trips/:tripId/start` - Start trip
+  - Returns: Trip với status `IN_PROGRESS`
+
+- `POST /trips/:tripId/finish` - Finish trip
+  - Body: `{ finalFare?: number }`
+  - Returns: Trip với status `COMPLETED`
+
+## Region Sharding
+
+Trip Command Service route requests đến đúng `driver-stream` shard dựa trên `cityCode`:
+
+- **HCM** → `driver-stream-hcm:8080`
+- **HN** → `driver-stream-hn:8080`
+- **Default** → `driver-stream-hcm:8080` (nếu `cityCode` không được specify)
+
+### Configuration
+
+File: `src/config/region-shard.config.ts`
+
+```typescript
+export const REGION_SHARD_CONFIG = {
+  HCM: {
+    driverStreamBaseUrl: process.env.DRIVER_STREAM_HCM_URL || 'http://driver-stream-hcm:8080',
+  },
+  HN: {
+    driverStreamBaseUrl: process.env.DRIVER_STREAM_HN_URL || 'http://driver-stream-hn:8080',
+  },
+};
 ```
 
-## Compile and run the project
+### Usage
 
-```bash
-# development
-$ npm run start
+```typescript
+// In create() method
+const cityCode = dto.cityCode || 'HCM';
+const driverStreamBaseUrl = getDriverStreamUrl(cityCode);
 
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+// Call driver-stream shard
+const nearbyResponse = await Http.get(
+  `${driverStreamBaseUrl}/v1/drivers/nearby`,
+  { params: { lat, lng, radius: 3000, limit: 20 } }
+);
 ```
 
-## Run tests
+## Database Schema
 
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+Trip model (Prisma):
+```prisma
+model Trip {
+  id          String     @id @default(uuid())
+  passengerId String
+  driverId    String?
+  originLat    Float
+  originLng   Float
+  destLat      Float
+  destLng      Float
+  note         String?
+  cityCode     String?   // For sharding (HCM, HN, etc.)
+  status       TripStatus @default(REQUESTED)
+  fare         Float?
+  rating       Int?
+  comment      String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  
+  @@index([cityCode, status])
+}
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Environment Variables
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+PORT=3002
+NODE_ENV=production
+
+# Database (PRIMARY for writes)
+PRIMARY_DB_URL=postgresql://uitgo:uitgo@postgres:5432/tripdb?schema=public
+DATABASE_URL=postgresql://uitgo:uitgo@postgres:5432/tripdb?schema=public  # Fallback
+
+# Driver Stream (Region Sharding)
+DRIVER_STREAM_HCM_URL=http://driver-stream-hcm:8080
+DRIVER_STREAM_HN_URL=http://driver-stream-hn:8080
+DRIVER_STREAM_URL=driver-stream-hcm:50052  # Legacy gRPC, keep for compatibility
+
+# gRPC Services
+USER_GRPC_URL=user-service:50051
+
+# OSRM
+OSRM_BASE_URL=http://osrm:5000
+
+# Kafka (for future event publishing)
+KAFKA_BROKERS=kafka:9092
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+## Development
 
-## Resources
+```bash
+# Install dependencies
+npm install
 
-Check out a few resources that may come in handy when working with NestJS:
+# Generate Prisma client
+npx prisma generate
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+# Run migrations
+npx prisma migrate dev
 
-## Support
+# Run in development mode
+npm run start:dev
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+# Build
+npm run build
 
-## Stay in touch
+# Run in production mode
+npm run start:prod
+```
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+## Docker
 
-## License
+```bash
+# Build image
+docker build -t uitgo-trip-command .
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+# Run container
+docker run -p 3002:3002 \
+  -e PRIMARY_DB_URL=postgresql://uitgo:uitgo@postgres:5432/tripdb \
+  -e DRIVER_STREAM_HCM_URL=http://driver-stream-hcm:8080 \
+  -e DRIVER_STREAM_HN_URL=http://driver-stream-hn:8080 \
+  -e USER_GRPC_URL=user-service:50051 \
+  -e OSRM_BASE_URL=http://osrm:5000 \
+  -v $(pwd)/../proto:/app/proto:ro \
+  uitgo-trip-command
+```
+
+## Health Check
+
+- `GET /healthz` - Health check endpoint
+  - Returns: `{ status: "ok" }`
+  - Checks: PostgreSQL connection
+
+## gRPC Integration
+
+Trip Command Service sử dụng gRPC để gọi:
+- **user-service**: `GetProfile` để verify user role
+
+### Proto Definition
+
+```protobuf
+service UserService {
+  rpc GetProfile(GetProfileRequest) returns (GetProfileResponse);
+}
+```
+
+## Error Handling
+
+- **400 Bad Request**: Invalid input, missing required fields
+- **403 Forbidden**: User không có quyền (ví dụ: non-DRIVER gọi accept)
+- **404 Not Found**: Trip không tồn tại
+- **500 Internal Server Error**: Database error, service error
+
+## Logging
+
+Service logs các operations quan trọng:
+- Trip creation với shard info: `Finding nearby drivers for trip ${tripId} via shard ${cityCode}`
+- Trip acceptance với shard info: `Claim trip ${tripId} via shard ${cityCode}`
+
+## CQRS Benefits
+
+1. **Independent Scaling**: Read và write operations có thể scale độc lập
+2. **Optimized Databases**: Read replica có thể optimize cho queries, primary optimize cho writes
+3. **Cache Strategy**: Read side có thể cache aggressively, write side không cần cache
+4. **Performance**: Read-heavy operations không ảnh hưởng write performance
+
+## Future Improvements
+
+1. **Event Publishing**: Publish trip events (created, accepted, completed) lên Kafka
+2. **Saga Pattern**: Implement distributed transaction cho complex flows
+3. **Idempotency**: Add idempotency keys để handle duplicate requests
+4. **Read Replica**: Tách read replica database cho production
+
+## Xem thêm
+
+- **Kiến trúc tổng thể**: Xem [`../../architecture/README.md`](../../architecture/README.md) để hiểu toàn bộ hệ thống UITGo
+- **ARCHITECTURE.md**: [`../../architecture/ARCHITECTURE.md`](../../architecture/ARCHITECTURE.md) - Kiến trúc chi tiết
+- **REPORT.md**: [`../../architecture/REPORT.md`](../../architecture/REPORT.md) - Báo cáo Module A
