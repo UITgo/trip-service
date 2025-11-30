@@ -24,6 +24,7 @@ import { catchError } from 'rxjs/operators';
 type TripStatus =
   | 'REQUESTED'
   | 'DRIVER_SEARCHING'
+  | 'NO_DRIVER_AVAILABLE'
   | 'DRIVER_ASSIGNED'
   | 'EN_ROUTE_TO_PICKUP'
   | 'ARRIVED'
@@ -116,36 +117,70 @@ export class TripsService implements OnModuleInit {
   }
 
   // ---------------- Create ----------------
-  async create(passengerId: string, dto: CreateTripDto) {
+  async create(passengerId: string, userRole: string, dto: CreateTripDto) {
     if (!dto?.origin || !dto?.destination) {
       throw new BadRequestException('origin & destination are required');
     }
 
-    // 1) gọi gRPC UserService.GetProfile để kiểm tra user & role
-    const prof = await firstValueFrom(
-      this.user
-        .GetProfile({ user_id: passengerId })
-        .pipe(
+    // 1) Try to get user profile from user-service, but gracefully fallback to JWT claims
+    let userProfile: {
+      exists: boolean;
+      user_id: string;
+      name: string;
+      avatar_url: string;
+      role: 'PASSENGER' | 'DRIVER' | '';
+    } | null = null;
+
+    try {
+      userProfile = await firstValueFrom(
+        this.user.GetProfile({ user_id: passengerId }).pipe(
           catchError((err) => {
             this.logger.warn(
-              `UserService.GetProfile error for ${passengerId}: ${err?.message || err}`,
+              `[TripsService] UserService.GetProfile error for ${passengerId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
             );
-            return of({
-              exists: false,
-              user_id: passengerId,
-              name: '',
-              avatar_url: '',
-              role: '' as const,
-            });
+            // Return null to indicate fallback needed
+            return of(null);
           }),
         ),
-    );
-
-    if (!prof.exists) {
-      throw new BadRequestException('User not found');
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[TripsService] UserService.GetProfile exception for ${passengerId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      // Continue with JWT claims fallback
     }
-    if (prof.role !== 'PASSENGER') {
+
+    // 2) Validate role: use user-service response if available, otherwise fallback to JWT claims
+    let validatedRole: 'PASSENGER' | 'DRIVER' | '' = '';
+    
+    if (userProfile && userProfile.exists) {
+      // User-service responded successfully
+      validatedRole = userProfile.role;
+      this.logger.debug(
+        `[TripsService] User profile from user-service: role=${validatedRole} for ${passengerId}`,
+      );
+    } else {
+      // Fallback to JWT claims (from gateway)
+      validatedRole = (userRole as 'PASSENGER' | 'DRIVER' | '') || '';
+      this.logger.warn(
+        `[TripsService] Using JWT role claim as fallback: role=${validatedRole} for ${passengerId}`,
+      );
+    }
+
+    // 3) Authorization check: only fail if role is explicitly not allowed
+    if (validatedRole === 'DRIVER') {
       throw new ForbiddenException('Only passengers can create trips');
+    }
+    
+    // If role is empty/missing and user-service is unreachable, we trust the gateway JWT
+    // (gateway already verified the JWT, so if it reached here, user is authenticated)
+    if (!validatedRole && !passengerId) {
+      // This should not happen if gateway is working correctly, but be defensive
+      throw new BadRequestException('User ID is required');
     }
 
     // 2) tính quote
@@ -249,7 +284,24 @@ export class TripsService implements OnModuleInit {
           },
         });
       } else {
-        this.logger.warn(`No nearby drivers found for trip ${trip.id}`);
+        // No nearby drivers found - update trip status to NO_DRIVER_AVAILABLE
+        this.logger.warn(
+          `No nearby drivers found for trip ${trip.id} from shard ${trip.cityCode}`,
+        );
+        
+        // Update trip status to NO_DRIVER_AVAILABLE (business case, not an error)
+        trip = await this.prisma.trip.update({
+          where: { id: trip.id },
+          data: { status: 'NO_DRIVER_AVAILABLE' as TripStatus },
+        });
+
+        await this.prisma.tripEvent.create({
+          data: {
+            tripId: trip.id,
+            type: 'NoDriverAvailable',
+            payload: ({ message: 'No nearby drivers found at trip creation' } as any),
+          },
+        });
       }
     } catch (e) {
       this.logger.error(`Driver search error for trip ${trip.id}:`, e);
@@ -344,78 +396,175 @@ export class TripsService implements OnModuleInit {
   }
 
   // ---------------- Accept / Decline ----------------
-  async accept(tripId: string, driverId: string) {
-    const t = await this.get(tripId);
-    const CAN_ACCEPT: TripStatus[] = ['DRIVER_SEARCHING', 'DRIVER_ASSIGNED'];
-    if (!CAN_ACCEPT.includes(t.status)) throw new BadRequestException('INVALID_STATE');
-
-    this.logger.log(`Driver ${driverId} attempting to claim trip ${tripId}`);
-    
-    // TODO(ModuleA-Shard): Use HTTP to call region-specific driver-stream shard
-    const driverStreamBaseUrl = getDriverStreamUrl(t.cityCode);
-    this.logger.log(
-      `Claim trip ${tripId} via shard ${t.cityCode} (${driverStreamBaseUrl})`,
-    );
-    
-    let res: { status: string };
+  async accept(tripId: string, driverId: string): Promise<{
+    success: boolean;
+    reason?: string;
+    tripId?: string;
+    status?: string;
+    message?: string;
+  }> {
     try {
-      const claimResponse = await Http.post(
-        `${driverStreamBaseUrl}/v1/assign/claim`,
-        {
+      // 1) Find trip - handle not found gracefully
+      let t;
+      try {
+        t = await this.get(tripId);
+      } catch (err: any) {
+        if (err?.status === 404 || err?.name === 'NotFoundException') {
+          this.logger.warn(`DriverAccept: trip ${tripId} not found (driverId: ${driverId})`);
+          return {
+            success: false,
+            reason: 'TRIP_NOT_FOUND',
+            message: `Trip ${tripId} not found`,
+          };
+        }
+        // Re-throw unexpected errors to be caught by outer try/catch
+        throw err;
+      }
+
+      // 2) Validate trip state - handle invalid state gracefully
+      const CAN_ACCEPT: TripStatus[] = ['DRIVER_SEARCHING', 'DRIVER_ASSIGNED'];
+      if (!CAN_ACCEPT.includes(t.status)) {
+        this.logger.warn(
+          `DriverAccept: trip ${tripId} in invalid state ${t.status} (driverId: ${driverId}, oldStatus: ${t.status})`,
+        );
+        return {
+          success: false,
+          reason: 'INVALID_STATE',
+          message: `Trip ${tripId} is in state ${t.status}, cannot be accepted`,
           tripId: tripId,
-          driverId: driverId,
-        },
+          status: t.status,
+        };
+      }
+
+      this.logger.log(
+        `DriverAccept: driver ${driverId} attempting to claim trip ${tripId} (currentStatus: ${t.status})`,
       );
-      res = { status: claimResponse.data?.status || 'ACCEPTED' };
+
+      // 3) Call driver-stream to claim trip
+      const driverStreamBaseUrl = getDriverStreamUrl(t.cityCode || 'HCM');
+      this.logger.debug(
+        `DriverAccept: claim trip ${tripId} via shard ${t.cityCode} (${driverStreamBaseUrl})`,
+      );
+
+      let claimStatus: string;
+      try {
+        const claimResponse = await Http.post(
+          `${driverStreamBaseUrl}/v1/assign/claim`,
+          {
+            tripId: tripId,
+            driverId: driverId,
+          },
+        );
+        claimStatus = claimResponse.data?.status || 'ACCEPTED';
+      } catch (err: any) {
+        this.logger.warn(
+          `DriverAccept: ClaimTrip HTTP failed for trip ${tripId} (shard ${t.cityCode}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        claimStatus = 'CLAIM_FAILED';
+      }
+
+      // 4) Handle claim rejection
+      if (claimStatus !== 'ACCEPTED') {
+        this.logger.warn(
+          `DriverAccept: trip ${tripId} claim rejected by driver-stream (status: ${claimStatus}, driverId: ${driverId})`,
+        );
+        
+        try {
+          await this.prisma.tripAssignment.updateMany({
+            where: { tripId, driverId },
+            data: { state: 'DECLINED', respondedAt: new Date() },
+          });
+          await this.prisma.tripEvent.create({
+            data: {
+              tripId,
+              type: 'DriverDeclined',
+              payload: ({ driverId, reason: claimStatus } as any),
+            },
+          });
+        } catch (dbErr: any) {
+          this.logger.error(
+            `DriverAccept: failed to update assignment/event for declined claim (tripId: ${tripId}): ${
+              dbErr instanceof Error ? dbErr.message : String(dbErr)
+            }`,
+          );
+        }
+
+        return {
+          success: false,
+          reason: 'CLAIM_REJECTED',
+          message: `Trip claim rejected: ${claimStatus}`,
+          tripId: tripId,
+        };
+      }
+
+      // 5) Happy path - successfully accept trip
+      this.logger.log(
+        `DriverAccept: trip ${tripId} successfully claimed by driver ${driverId} (oldStatus: ${t.status} -> newStatus: EN_ROUTE_TO_PICKUP)`,
+      );
+
+      try {
+        // Update assignment
+        await this.prisma.tripAssignment.updateMany({
+          where: { tripId, driverId },
+          data: { state: 'CLAIMED', respondedAt: new Date() },
+        });
+
+        // Update trip status
+        const updatedTrip = await this.prisma.trip.update({
+          where: { id: tripId },
+          data: { status: 'EN_ROUTE_TO_PICKUP' as TripStatus, driverId },
+        });
+
+        // Emit SSE event
+        emitEvent(tripId, 'STATUS_CHANGED', { status: updatedTrip.status, driverId });
+
+        // Create event
+        await this.prisma.tripEvent.create({
+          data: {
+            tripId,
+            type: 'DriverAccepted',
+            payload: ({ driverId } as any),
+          },
+        });
+
+        // Invalidate cache (no-op but kept for consistency)
+        await this.invalidateCache(tripId);
+
+        return {
+          success: true,
+          tripId: tripId,
+          status: updatedTrip.status,
+        };
+      } catch (dbErr: any) {
+        this.logger.error(
+          `DriverAccept: database error while accepting trip ${tripId} (driverId: ${driverId}): ${
+            dbErr instanceof Error ? dbErr.message : String(dbErr)
+          }`,
+        );
+        return {
+          success: false,
+          reason: 'INTERNAL_ERROR',
+          message: 'Failed to update trip in database',
+          tripId: tripId,
+        };
+      }
     } catch (err: any) {
-      this.logger.warn(
-        `Driver ClaimTrip HTTP failed for shard ${t.cityCode}: ${err?.message || err}`,
+      // Catch any unexpected errors and return graceful response
+      this.logger.error(
+        `DriverAccept: unexpected error for trip ${tripId} (driverId: ${driverId}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        err instanceof Error ? err.stack : undefined,
       );
-      res = { status: 'DECLINED' };
+      return {
+        success: false,
+        reason: 'INTERNAL_ERROR',
+        message: 'An unexpected error occurred while accepting trip',
+        tripId: tripId,
+      };
     }
-
-    if (res.status !== 'ACCEPTED') {
-      this.logger.warn(`Trip ${tripId} claim rejected: ${res.status}`);
-      await this.prisma.tripAssignment.updateMany({
-        where: { tripId, driverId },
-        data: { state: 'DECLINED', respondedAt: new Date() },
-      });
-      await this.prisma.tripEvent.create({
-        data: {
-          tripId,
-          type: 'DriverDeclined',
-          payload: ({ driverId, reason: res.status } as any),
-        },
-      });
-      return { ok: false, reason: res.status || 'CLAIM_REJECTED' };
-    }
-
-    this.logger.log(`Trip ${tripId} successfully claimed by driver ${driverId}`);
-    
-    await this.prisma.tripAssignment.updateMany({
-      where: { tripId, driverId },
-      data: { state: 'CLAIMED', respondedAt: new Date() },
-    });
-
-    const up = await this.prisma.trip.update({
-      where: { id: tripId },
-      data: { status: 'EN_ROUTE_TO_PICKUP' as TripStatus, driverId },
-    });
-
-    emitEvent(tripId, 'STATUS_CHANGED', { status: up.status, driverId });
-
-    await this.prisma.tripEvent.create({
-      data: {
-        tripId,
-        type: 'DriverAccepted',
-        payload: ({ driverId } as any),
-      },
-    });
-
-    // Invalidate cache after update
-    await this.invalidateCache(tripId);
-
-    return { ok: true };
   }
 
   async decline(tripId: string, driverId: string) {

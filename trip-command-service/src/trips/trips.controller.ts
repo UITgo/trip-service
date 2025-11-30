@@ -16,8 +16,9 @@ export class TripsController {
     // userId do gateway set từ JWT
     const passengerId =
       (req.headers['x-user-id'] as string) || 'u_pass_dev'; // fallback dev
+    const userRole = (req.headers['x-user-role'] as string) || '';
 
-    return this.svc.create(passengerId, dto);
+    return this.svc.create(passengerId, userRole, dto);
   }
 
   // TODO(ModuleA-CQRS): Read operations moved to trip-query-service
@@ -36,12 +37,17 @@ export class TripsController {
   }
 
   @Post(':tripId/accept')
-  accept(@Req() req: any, @Param('tripId') id: string) {
+  async accept(@Req() req: any, @Param('tripId') id: string) {
     const driverId = (req.headers['x-user-id'] as string) || 'driver_dev';
     const role = (req.headers['x-user-role'] as string) || '';
     
+    // Handle non-driver role gracefully (return 200 with reason, not 403)
     if (role !== 'DRIVER') {
-      throw new ForbiddenException('Only drivers can accept trips');
+      return {
+        success: false,
+        reason: 'NOT_DRIVER',
+        message: 'Only drivers can accept trips',
+      };
     }
     
     return this.svc.accept(id, driverId);

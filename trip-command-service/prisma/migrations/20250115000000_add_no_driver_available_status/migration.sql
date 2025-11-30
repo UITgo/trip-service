@@ -1,0 +1,3 @@
+-- AlterEnum
+ALTER TYPE "TripStatus" ADD VALUE 'NO_DRIVER_AVAILABLE';
+
